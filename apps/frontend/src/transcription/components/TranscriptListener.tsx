@@ -10,7 +10,7 @@ const TranscriptListener = () => {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   useEffect(() => {
-    const socket = new WebSocket("ws://localhost:5001/ws/transcripts");
+    const socket = new WebSocket("ws://localhost:3000");
 
     socket.onopen = () => {
       console.log("Connected to transcript WebSocket");
@@ -18,22 +18,14 @@ const TranscriptListener = () => {
 
     socket.onmessage = async (event) => {
       const data = JSON.parse(event.data);
-      if (data.status === "updated") {
-        console.log("📡 Transcript updated from backend via WebSocket!");
+      if (data.type === "transcription") {
+        console.log("📡 Transcript received from backend via WebSocket!");
         try {
-          const res = await fetch("http://localhost:5001/transcripts");
-          const json = await res.json();
-
-          if (Array.isArray(json.transcript)) {
-            setTranscripts(json.transcript);
-          } else {
-            console.warn("Transcript response was not an array:", json);
-          }
-
+          // Handle transcription result directly
+          setTranscripts(prev => [...prev, { text: data.text, speaker: data.speaker }]);
           setLastUpdated(new Date().toLocaleTimeString());
-          await fetch("http://localhost:5001/generate", { method: "POST" });
         } catch (err) {
-          console.error("Failed to fetch updated transcript:", err);
+          console.error("Failed to process transcription:", err);
         }
       }
     };

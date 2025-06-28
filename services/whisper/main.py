@@ -1,6 +1,12 @@
 """
 Whisper Service Main Application
-Modular FastAPI application for real-time audio transcription using Whisper.
+FastAPI application for real-time audio transcription using Whisper.
+
+Two implementation options available:
+1. Integrated approach (current) - All logic in main.py
+2. Modular approach - Uses src/websocket/endpoint.py
+
+To switch to modular approach, uncomment the modular imports and endpoint below.
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -13,6 +19,10 @@ from src.config.settings import get_logger, SERVER_HOST, SERVER_PORT, DEBUG_MODE
 
 # Initialize logger
 logger = get_logger(__name__)
+
+# === MODULAR APPROACH (OPTIONAL) ===
+# Uncomment the following lines to use the modular WebSocket implementation:
+# from src.websocket.endpoint import websocket_endpoint as modular_websocket_endpoint
 
 # Lazy import and initialization of heavy components
 transcription_engine = None
@@ -51,6 +61,10 @@ async def health_check():
 @app.websocket("/")
 async def websocket_endpoint(websocket: WebSocket):
     """Real-time transcription WebSocket endpoint."""
+    # === MODULAR APPROACH OPTION ===
+    # To use the modular implementation, replace the function body below with:
+    # await modular_websocket_endpoint(websocket)
+    # return
     global transcription_engine, AudioProcessor
 
     session_id = str(uuid.uuid4())
@@ -161,6 +175,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         # Write audio data to buffer
                         session_data["audio_buffer"].write(audio_data)
+                        logger.debug(f"[{session_id}] Buffer size after write: {session_data['audio_buffer'].tell()} bytes")
 
                         # Process audio if buffer has enough data
                         if processor.should_process_buffer():
@@ -173,12 +188,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
                                     # Transcribe audio
                                     transcribed_text, info = transcription_engine.transcribe_audio(audio_np)
+                                    logger.debug(f"[{session_id}] Transcription result: '{transcribed_text}' (length: {len(transcribed_text) if transcribed_text else 0})")
 
                                     if transcribed_text and transcribed_text.strip():
-                                        # Create transcription result
-                                        result = transcription_engine.create_transcription_result(
-                                            session_data, transcribed_text, info
-                                        )
+                                        # Create transcription result with proper format
+                                        result = {
+                                            "type": "transcription",
+                                            "meetingId": session_data["meeting_id"],
+                                            "speaker": session_data["speaker"],
+                                            "text": transcribed_text,
+                                            "language": info.language if info and hasattr(info, 'language') else "en",
+                                            "is_final": True  # Mark as final for real-time chunks
+                                        }
 
                                         # Send transcription result
                                         await websocket.send_text(json.dumps(result))
