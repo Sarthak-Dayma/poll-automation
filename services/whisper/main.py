@@ -48,7 +48,6 @@ async def health_check():
     return status
 
 
-
 @app.websocket("/")
 async def websocket_endpoint(websocket: WebSocket):
     """Real-time transcription WebSocket endpoint."""
