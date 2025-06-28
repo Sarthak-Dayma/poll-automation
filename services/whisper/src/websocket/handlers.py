@@ -1,226 +1,157 @@
 """
-WebSocket handlers for Whisper service.
-Manages WebSocket connections, message handling, and transcription sending.
+WebSocket handling module for Whisper service.
+Manages WebSocket connections, message processing, and session lifecycle.
 """
 
 import asyncio
-import time
-import io
 import json
-from typing import Dict, Any, Optional
-from fastapi import WebSocket
-
-from ..config.settings import get_logger, SESSION_INACTIVITY_TIMEOUT
+import uuid
+import io
+from typing import Dict, Any, Union
+from fastapi import WebSocket, WebSocketDisconnect
+from ..config.settings import BUFFER_DURATION_SECONDS, get_logger
+from ..transcription.engine import transcription_engine
 
 logger = get_logger(__name__)
 
-class WebSocketConnectionManager:
-    """Manages WebSocket connections and session data."""
+class WebSocketSessionManager:
+    """Manages WebSocket sessions and their lifecycle."""
     
     def __init__(self):
-        self.active_connections = {}
-        self.heartbeat_task = None
-        self.start_heartbeat_monitor()
+        self.connected_sessions: Dict[str, Dict[str, Any]] = {}
     
-    def start_heartbeat_monitor(self):
-        """Start a background task to monitor connection health."""
-        if self.heartbeat_task is None:
-            self.heartbeat_task = asyncio.create_task(self.monitor_connections())
-    
-    async def monitor_connections(self):
-        """Periodically check connection health and send heartbeats."""
-        while True:
-            try:
-                await asyncio.sleep(15)  # Check every 15 seconds
-                
-                # Send heartbeats to all connections
-                disconnected = []
-                for session_id, session_data in self.active_connections.items():
-                    websocket = session_data.get("websocket")
-                    last_activity = session_data.get("last_activity", 0)
-                    
-                    # Check for timeout
-                    if time.time() - last_activity > SESSION_INACTIVITY_TIMEOUT:
-                        logger.warning(f"[{session_id}] Session timeout after {SESSION_INACTIVITY_TIMEOUT}s of inactivity")
-                        disconnected.append(session_id)
-                        continue
-                    
-                    if websocket and not websocket.closed:
-                        try:
-                            # Send a ping to keep the connection alive
-                            await websocket.send_json({"type": "ping", "timestamp": time.time()})
-                            logger.debug(f"[{session_id}] Sent heartbeat ping")
-                        except Exception as e:
-                            logger.warning(f"[{session_id}] Failed to send heartbeat: {e}")
-                            disconnected.append(session_id)
-                    else:
-                        disconnected.append(session_id)
-                
-                # Clean up disconnected sessions
-                for session_id in disconnected:
-                    await self.disconnect(session_id)
-                    
-            except Exception as e:
-                logger.error(f"Error in connection monitor: {e}")
-    
-    async def connect(self, websocket: WebSocket, session_id: str) -> Dict[str, Any]:
+    def create_session(self, websocket: WebSocket) -> Dict[str, Any]:
         """
-        Register a new WebSocket connection.
+        Create a new WebSocket session.
         
         Args:
-            websocket: The WebSocket connection
-            session_id: Unique session identifier
+            websocket: FastAPI WebSocket instance
             
         Returns:
             Session data dictionary
         """
-        await websocket.accept()
-        
-        # Create session data structure
+        session_id = str(uuid.uuid4())
         session_data = {
             "session_id": session_id,
             "websocket": websocket,
-            "connected_at": time.time(),
-            "last_activity": time.time(),
+            "meeting_id": "N/A",  # Default, will be updated by 'start' message
+            "speaker": "N/A",     # Default, will be updated by 'start' message
             "audio_buffer": io.BytesIO(),
             "transcript_queue": asyncio.Queue(),
+            "processing_task": None,
             "shutdown_event": asyncio.Event(),
             "transcription_finished_event": asyncio.Event(),
-            "connection_active": True  # Flag to track if connection is still considered active
+            "websocket_closed_by_endpoint": asyncio.Event(),
         }
-        
-        self.active_connections[session_id] = session_data
-        logger.info(f"[{session_id}] WebSocket connection established")
-        
+        self.connected_sessions[session_id] = session_data
+        logger.info(f"[{session_id}] NEW SESSION: Client connected and WebSocket accepted.")
         return session_data
     
-    async def disconnect(self, session_id: str):
-        """
-        Unregister a WebSocket connection.
-        
-        Args:
-            session_id: Session identifier to disconnect
-        """
-        if session_id in self.active_connections:
-            session_data = self.active_connections[session_id]
-            
-            # Set shutdown event to signal processing to stop
-            if "shutdown_event" in session_data:
-                session_data["shutdown_event"].set()
-            
-            # Mark connection as inactive
-            session_data["connection_active"] = False
-            
-            # Wait briefly for processing to finish
-            if "transcription_finished_event" in session_data:
-                try:
-                    await asyncio.wait_for(session_data["transcription_finished_event"].wait(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"[{session_id}] Timeout waiting for transcription to finish")
-            
-            # Close WebSocket if still open
-            if "websocket" in session_data and not session_data["websocket"].closed:
-                try:
-                    await session_data["websocket"].close()
-                except Exception as e:
-                    logger.error(f"[{session_id}] Error closing WebSocket: {e}")
-            
-            # Remove from active connections
-            del self.active_connections[session_id]
-            logger.info(f"[{session_id}] WebSocket connection closed")
-    
-    def update_activity(self, session_id: str):
-        """Update the last activity timestamp for a session."""
-        if session_id in self.active_connections:
-            self.active_connections[session_id]["last_activity"] = time.time()
-
-# Global connection manager instance
-connection_manager = WebSocketConnectionManager()
+    def remove_session(self, session_id: str):
+        """Remove a session from the connected sessions."""
+        if session_id in self.connected_sessions:
+            session_data = self.connected_sessions[session_id]
+            session_data["audio_buffer"].close()
+            del self.connected_sessions[session_id]
+            logger.info(f"[{session_id}] Session cleaned up and removed from store. Active sessions: {len(self.connected_sessions)}")
+        else:
+            logger.warning(f"[{session_id}] Session not found in connected_sessions during final cleanup. Already removed?")
 
 class WebSocketMessageHandler:
-    """Handles WebSocket messages from clients."""
+    """Handles WebSocket message processing."""
+    
+    @staticmethod
+    async def handle_start_message(session_data: Dict[str, Any], data: Dict[str, Any]):
+        """Handle 'start' message from client."""
+        session_id = session_data["session_id"]
+        websocket = session_data["websocket"]
+        
+        session_data["meeting_id"] = data.get("meetingId", "N/A")
+        session_data["speaker"] = data.get("speaker", "N/A")
+        
+        logger.info(f"[{session_id}] Received 'start' signal for meeting: {session_data['meeting_id']}, speaker: {session_data['speaker']}")
+        await websocket.send_json({"type": "status", "message": "Whisper session started"})
+    
+    @staticmethod
+    async def handle_end_message(session_data: Dict[str, Any]):
+        """Handle 'end' message from client."""
+        session_id = session_data["session_id"]
+        
+        logger.info(f"[{session_id}] Received 'end' signal. Signaling shutdown.")
+        session_data["shutdown_event"].set()
     
     @staticmethod
     def handle_audio_chunk(session_data: Dict[str, Any], audio_chunk: bytes):
         """Handle binary audio data from client."""
         session_id = session_data["session_id"]
         
-        # Update last activity timestamp
-        if "last_activity" in session_data:
-            session_data["last_activity"] = time.time()
-        
-        # Use the processor's add_audio_data method which has better silence handling
-        if "processor" in session_data and hasattr(session_data["processor"], "add_audio_data"):
-            session_data["processor"].add_audio_data(audio_chunk)
-        else:
-            # Fallback to direct buffer writing
-            session_data["audio_buffer"].write(audio_chunk)
-        
-        # Update connection manager activity
-        connection_manager = session_data.get("connection_manager")
-        if connection_manager and hasattr(connection_manager, "update_activity"):
-            connection_manager.update_activity(session_id)
-        
-        logger.debug(f"[{session_id}] Received audio chunk of {len(audio_chunk)} bytes.")
+        session_data["audio_buffer"].write(audio_chunk)
+        logger.debug(f"[{session_id}] Received audio chunk of {len(audio_chunk)} bytes. Buffer size: {session_data['audio_buffer'].tell()} bytes.")
 
 class WebSocketTranscriptionSender:
-    """Sends transcription results to clients via WebSocket."""
+    """Handles sending transcription results to WebSocket clients."""
     
     @staticmethod
-    async def send_transcriptions(session_id: str, session_data: Dict[str, Any]):
+    async def send_transcriptions(session_data: Dict[str, Any]):
         """
-        Background task to send transcription results to the client.
+        Send transcriptions from queue to WebSocket client.
         
         Args:
-            session_id: Session identifier
-            session_data: Session data dictionary
+            session_data: Session metadata and state
         """
-        transcript_queue = session_data["transcript_queue"]
-        websocket = session_data["websocket"]
+        session_id = session_data["session_id"]
+        websocket: WebSocket = session_data["websocket"]
+        transcript_queue: asyncio.Queue = session_data["transcript_queue"]
+        websocket_closed_by_endpoint: asyncio.Event = session_data["websocket_closed_by_endpoint"]
+        transcription_finished_event: asyncio.Event = session_data["transcription_finished_event"]
+        
+        logger.info(f"[{session_id}] Transcription sender task started.")
         
         try:
             while True:
-                # Wait for transcription result
-                try:
-                    result = await asyncio.wait_for(transcript_queue.get(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    # Check if session is closed
-                    if session_data["shutdown_event"].is_set():
-                        break
-                    continue
-                
-                # Check if session is closed
-                if session_data["shutdown_event"].is_set() and transcript_queue.empty():
+                # Priority check: Has the main websocket_endpoint signaled its shutdown?
+                if websocket_closed_by_endpoint.is_set():
+                    logger.info(f"[{session_id}] Sender task: Main endpoint signaled closure. Exiting send loop.")
                     break
                 
-                # Send result to client
-                if result:
-                    try:
-                        if isinstance(result, dict):
-                            await websocket.send_json(result)
-                        else:
-                            await websocket.send_text(json.dumps(result))
-                        
-                        # Log transcription (if present)
-                        if "text" in result:
-                            logger.info(f"[{session_id}] Sent transcription: {result['text']}")
-                    except Exception as e:
-                        logger.error(f"[{session_id}] Error sending transcription: {e}")
+                try:
+                    # Wait for results from the queue with a timeout
+                    result = await asyncio.wait_for(transcript_queue.get(), timeout=0.5)
+                    
+                    # Attempt to send the result
+                    await websocket.send_json(result)
+                    logger.debug(f"[{session_id}] Sent transcription: {result.get('text', 'N/A')[:50]}...")
+                    
+                    # If it was a final message and processing is also confirmed finished, then exit
+                    if result.get("is_final") and transcription_finished_event.is_set() and transcript_queue.empty():
+                        logger.info(f"[{session_id}] Sender task: Final message sent and all processing complete. Exiting.")
                         break
                 
-                # Mark task as done
-                transcript_queue.task_done()
+                except asyncio.TimeoutError:
+                    # Queue empty for now. Check if processing is finished and no more expected
+                    if transcription_finished_event.is_set() and transcript_queue.empty():
+                        logger.info(f"[{session_id}] Sender task: Queue empty and processing finished. Exiting.")
+                        break
+                    else:
+                        logger.debug(f"[{session_id}] Sender task: Timeout, waiting for more data or shutdown.")
+                    continue
+                
+                except RuntimeError as e:
+                    # This is the most common error when the client's WebSocket closes first
+                    logger.error(f"[{session_id}] Sender task: WebSocket connection likely closed. Error: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"[{session_id}] Sender task: Unexpected error during send: {e}", exc_info=True)
+                    break
+        
+        except asyncio.CancelledError:
+            logger.info(f"[{session_id}] Sender task cancelled.")
         except Exception as e:
-            logger.error(f"[{session_id}] Error in send_transcriptions: {e}")
+            logger.error(f"[{session_id}] Sender task: Unhandled error: {e}", exc_info=True)
         finally:
-            # Signal that transcription sending is finished
-            session_data["transcription_finished_event"].set()
-            logger.info(f"[{session_id}] Transcription sender task finished")
+            logger.info(f"[{session_id}] Transcription sender task finished.")
 
 # Global instances
 session_manager = WebSocketSessionManager()
 message_handler = WebSocketMessageHandler()
 transcription_sender = WebSocketTranscriptionSender()
-
-
-

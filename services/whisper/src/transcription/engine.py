@@ -22,8 +22,7 @@ class TranscriptionEngine:
         self._load_model()
         self.last_successful_transcription = time.time()
         self.WATCHDOG_TIMEOUT = 10  # seconds
-        self.active_sessions = {}  # Track active sessions and their last activity
-
+    
     def _load_model(self):
         """Load the Whisper model with configured settings."""
         try:
@@ -94,28 +93,12 @@ class TranscriptionEngine:
         """Process audio stream for a session."""
         transcript_queue = session_data["transcript_queue"]
         
-        # Store session data for watchdog
-        if not hasattr(self, 'session_data'):
-            self.session_data = {}
-        self.session_data[session_id] = session_data
-        
-        # Track session activity
-        self.active_sessions[session_id] = time.time()
-        
-        # Start watchdog task
-        watchdog_task = asyncio.create_task(self.check_watchdog(session_id))
-        
         # Add a processing queue with max size to prevent memory issues
         processing_queue = asyncio.Queue(maxsize=settings.MAX_QUEUE_SIZE)
         
         # Start a background task for actual transcription
         transcription_task = asyncio.create_task(
             self._transcribe_from_queue(session_id, processing_queue, transcript_queue)
-        )
-        
-        # Periodic reset task to ensure fresh state
-        reset_task = asyncio.create_task(
-            self._periodic_reset(session_id, processor)
         )
         
         try:
@@ -130,9 +113,6 @@ class TranscriptionEngine:
                     if not audio_bytes:
                         continue
                     
-                    # Update session activity timestamp
-                    self.active_sessions[session_id] = time.time()
-                    
                     # Convert to numpy array
                     try:
                         audio_np = processor.bytes_to_numpy(audio_bytes)
@@ -142,17 +122,26 @@ class TranscriptionEngine:
                             logger.warning(f"[{session_id}] Processing queue full, dropping oldest chunk")
                             # Remove oldest item to make room (backpressure)
                             try:
+                                # Get without waiting
                                 processing_queue.get_nowait()
                                 processing_queue.task_done()
                             except asyncio.QueueEmpty:
                                 pass
                         
                         # Add to processing queue
-                        await processing_queue.put({
-                            "audio_np": audio_np,
-                            "timestamp": time.time()
-                        })
-                        
+                        try:
+                            # Add with timeout to prevent blocking
+                            await asyncio.wait_for(
+                                processing_queue.put({
+                                    "audio_np": audio_np,
+                                    "timestamp": time.time()
+                                }),
+                                timeout=0.5
+                            )
+                            logger.info(f"[{session_id}] Added chunk to queue. Size: {processing_queue.qsize()}/{settings.MAX_QUEUE_SIZE}")
+                        except asyncio.TimeoutError:
+                            logger.error(f"[{session_id}] Failed to add chunk to queue - timeout")
+                    
                     except Exception as e:
                         logger.error(f"[{session_id}] Error processing audio: {e}")
                     
@@ -165,31 +154,22 @@ class TranscriptionEngine:
             logger.error(f"[{session_id}] Error in process_audio_stream: {e}")
         finally:
             # Signal transcription task to finish
-            await processing_queue.put(None)
+            try:
+                await asyncio.wait_for(processing_queue.put(None), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[{session_id}] Could not add termination signal to queue")
             
-            # Wait for transcription task to complete
+            # Wait for transcription task to complete with timeout
             try:
                 await asyncio.wait_for(transcription_task, timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning(f"[{session_id}] Transcription task did not complete in time")
-                
-            # Cancel other tasks
-            watchdog_task.cancel()
-            reset_task.cancel()
-            
-            # Clean up session data
-            if hasattr(self, 'session_data') and session_id in self.session_data:
-                del self.session_data[session_id]
-            
-            if session_id in self.active_sessions:
-                del self.active_sessions[session_id]
-
+    
     async def check_watchdog(self, session_id: str):
         """Check if transcription is stuck and restart if needed."""
         while True:
             await asyncio.sleep(5)  # Check every 5 seconds
             
-            # Check model health
             time_since_last = time.time() - self.last_successful_transcription
             if time_since_last > self.WATCHDOG_TIMEOUT:
                 logger.warning(f"[{session_id}] Transcription appears stuck for {time_since_last:.1f}s. Restarting model.")
@@ -200,62 +180,9 @@ class TranscriptionEngine:
                     self.last_successful_transcription = time.time()
                 except Exception as e:
                     logger.error(f"Failed to reload model: {e}")
-            
-            # Check session activity
-            if session_id in self.active_sessions:
-                time_since_activity = time.time() - self.active_sessions[session_id]
-                # If no activity for 30 seconds, send a ping transcription to keep the connection alive
-                if time_since_activity > 30:
-                    logger.info(f"[{session_id}] No activity for {time_since_activity:.1f}s, sending keepalive")
-                    try:
-                        # Get the transcript queue for this session
-                        if hasattr(self, 'session_data') and self.session_data.get(session_id):
-                            transcript_queue = self.session_data[session_id].get("transcript_queue")
-                            if transcript_queue:
-                                # Put a keepalive message in the queue
-                                await transcript_queue.put({
-                                    "type": "keepalive",
-                                    "timestamp": time.time()
-                                })
-                                # Update activity time
-                                self.active_sessions[session_id] = time.time()
-                    except Exception as e:
-                        logger.error(f"[{session_id}] Error sending keepalive: {e}")
-
-    async def _periodic_reset(self, session_id: str, processor: AudioProcessor):
-        """Periodically reset the transcription state to ensure fresh processing."""
-        while True:
-            await asyncio.sleep(30)  # Check every 30 seconds
-            
-            # Get time since last activity
-            if session_id in self.active_sessions:
-                time_since_activity = time.time() - self.active_sessions[session_id]
-                
-                # If it's been more than 15 seconds since activity, do a soft reset
-                if time_since_activity > 15:
-                    logger.info(f"[{session_id}] Performing periodic reset after {time_since_activity:.1f}s inactivity")
-                    
-                    # Reset the processor buffer
-                    processor.reset_buffer()
-                    
-                    # Send a status message to client
-                    try:
-                        if hasattr(self, 'session_data') and self.session_data.get(session_id):
-                            transcript_queue = self.session_data[session_id].get("transcript_queue")
-                            if transcript_queue:
-                                await transcript_queue.put({
-                                    "type": "status",
-                                    "message": "Connection refreshed due to inactivity",
-                                    "timestamp": time.time()
-                                })
-                    except Exception as e:
-                        logger.error(f"[{session_id}] Error sending reset status: {e}")
 
 # Global transcription engine instance
 transcription_engine = TranscriptionEngine()
-
-
-
 
 
 

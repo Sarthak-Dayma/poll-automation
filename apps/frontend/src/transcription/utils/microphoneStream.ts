@@ -21,14 +21,11 @@ export class MicrophoneStreamer {
     private ws: WebSocket | null = null;
     private mediaStream: MediaStream | null = null;
     private audioContext: AudioContext | null = null;
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore - ScriptProcessorNode is deprecated but widely supported, AudioWorklet for modern apps
-    private audioProcessor: ScriptProcessorNode | null = null;
+    private audioProcessor: ScriptProcessorNode | null = null; // Deprecated but widely supported, AudioWorklet for modern apps
     private isStreaming: boolean = false;
     private assignedSpeakerId: string | null = null; // Store the ID assigned by the backend
     private audioQueue: Int16Array[] = []; // Queue audio until speakerId is assigned
-    private processingInterval: number | null = null; // Interval for sending queued audio
-    private pingInterval: number | null = null; // Interval for ping messages
+    private processingInterval: any; // Interval for sending queued audio
 
     private readonly websocketUrl: string;
     private readonly meetingId: string;
@@ -52,7 +49,7 @@ export class MicrophoneStreamer {
         this.onStreamEnd = options.onStreamEnd;
     }
 
-    private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, ...args: unknown[]) {
+    private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, ...args: any[]) {
         const prefix = `[MicStreamer-${this.meetingId}-${this.proposedSpeakerName}]`;
         if (level === 'error') console.error(prefix, message, ...args);
         else if (level === 'warn') console.warn(prefix, message, ...args);
@@ -82,8 +79,6 @@ export class MicrophoneStreamer {
 
             // Using ScriptProcessorNode (deprecated, but widely compatible for quick setup)
             // For production, consider AudioWorklet for better performance and modern API.
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore - createScriptProcessor is deprecated but needed for compatibility
             this.audioProcessor = this.audioContext.createScriptProcessor(this.BUFFER_SIZE, 1, 1);
             // Don't set onaudioprocess yet - wait for WebSocket connection
             source.connect(this.audioProcessor);
@@ -122,8 +117,6 @@ export class MicrophoneStreamer {
                 // Give the backend a moment to process the start message, then start audio processing
                 setTimeout(() => {
                     if (this.audioProcessor && this.ws?.readyState === WebSocket.OPEN) {
-                        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                        // @ts-ignore - onaudioprocess is deprecated but needed for compatibility
                         this.audioProcessor.onaudioprocess = this.handleAudioProcess;
                         this.isStreaming = true;
                         this.log('info', 'Audio processing started after WebSocket connection.');
@@ -131,7 +124,7 @@ export class MicrophoneStreamer {
                 }, 200); // 200ms delay to ensure backend processes start message (increased from 100ms)
 
                 // Start sending queued audio only after speakerId is assigned
-                this.processingInterval = window.setInterval(() => {
+                this.processingInterval = setInterval(() => {
                     if (this.assignedSpeakerId && this.audioQueue.length > 0) {
                         const buffer = this.audioQueue.shift(); // Get oldest chunk
                         if (buffer) {
@@ -140,41 +133,12 @@ export class MicrophoneStreamer {
                         }
                     }
                 }, 50); // Send every 50ms if data is available
-
-                // Send ping every 25 seconds to keep connection alive
-                this.pingInterval = window.setInterval(() => {
-                    if (this.ws?.readyState === WebSocket.OPEN) {
-                        try {
-                            this.ws.send(JSON.stringify({
-                                type: 'ping',
-                                timestamp: Date.now()
-                            }));
-                            this.log('debug', 'Sent ping');
-                        } catch (error) {
-                            this.log('error', 'Failed to send ping:', error);
-                        }
-                    }
-                }, 25000);
             };
 
             this.ws.onmessage = (event) => {
-                const message: ServerToFrontendMessage | { type: 'ping'; timestamp: number } = JSON.parse(event.data);
+                const message: ServerToFrontendMessage = JSON.parse(event.data);
                 this.log('debug', 'Received message:', message);
 
-                // Handle ping messages by sending a pong response
-                if (message.type === 'ping') {
-                    try {
-                        this.ws?.send(JSON.stringify({
-                            type: 'pong',
-                            timestamp: Date.now()
-                        }));
-                        this.log('debug', 'Sent pong response');
-                    } catch (error) {
-                        this.log('error', 'Failed to send pong:', error);
-                    }
-                    return;
-                }
-                
                 if (message.type === 'status') {
                     const statusMessage = message as StartConfirmationMessage;
                     this.onStatus(statusMessage.message);
@@ -196,12 +160,6 @@ export class MicrophoneStreamer {
                 this.log('info', `WebSocket closed: ${event.code} - ${event.reason}`);
                 this.onStatus('Connection closed.');
                 this.cleanup();
-
-                // Clear ping interval
-                if (this.pingInterval !== null) {
-                    clearInterval(this.pingInterval);
-                    this.pingInterval = null;
-                }
             };
 
             this.ws.onerror = (error) => {
@@ -217,15 +175,11 @@ export class MicrophoneStreamer {
         }
     }
 
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore - AudioProcessingEvent is deprecated but needed for compatibility
     private handleAudioProcess = (event: AudioProcessingEvent) => {
         if (!this.isStreaming || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
             return;
         }
 
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore - inputBuffer is deprecated but needed for compatibility
         const inputBuffer = event.inputBuffer.getChannelData(0);
         // Convert Float32Array to Int16Array (16-bit PCM) for the Python backend
         const int16Buffer = new Int16Array(inputBuffer.length);
@@ -271,14 +225,8 @@ export class MicrophoneStreamer {
             clearInterval(this.processingInterval);
             this.processingInterval = null;
         }
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
         if (this.audioProcessor) {
             this.audioProcessor.disconnect();
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore - onaudioprocess is deprecated but needed for compatibility
             this.audioProcessor.onaudioprocess = null;
             this.audioProcessor = null;
         }

@@ -95,17 +95,10 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 ENABLE_REQUEST_LOGGING = os.getenv("ENABLE_REQUEST_LOGGING", "false").lower() == "true"
 
 # --- WebSocket Settings ---
-WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", 15))  # Reduced from 30 to 15 seconds
-WS_CONNECTION_TIMEOUT = int(os.getenv("WS_CONNECTION_TIMEOUT", 120))  # Increased from 60 to 120 seconds
+WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", 30))
+WS_CONNECTION_TIMEOUT = int(os.getenv("WS_CONNECTION_TIMEOUT", 60))
 MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", 1048576))
 AUDIO_PROCESSING_INTERVAL = float(os.getenv("AUDIO_PROCESSING_INTERVAL", 0.05))
-
-# --- Session Settings ---
-# How long to keep a session alive with no activity (seconds)
-SESSION_INACTIVITY_TIMEOUT = int(os.getenv("SESSION_INACTIVITY_TIMEOUT", 300))  # 5 minutes
-
-# Maximum silence duration before forcing buffer processing (seconds)
-MAX_SILENCE_DURATION = float(os.getenv("MAX_SILENCE_DURATION", 10.0))
 
 # --- Logging Configuration ---
 def get_logger(name: str) -> logging.Logger:
@@ -130,5 +123,4 @@ QUEUE_BACKEND = os.getenv("QUEUE_BACKEND", "memory")
 
 # Redis connection string (if using Redis)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 
