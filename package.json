@@ -27,5 +27,8 @@
   "devDependencies": {
     "@types/node": "^24.0.3",
     "turbo": "^2.5.4"
+  },
+  "dependencies": {
+    "mongoose": "^8.16.0"
   }
 }

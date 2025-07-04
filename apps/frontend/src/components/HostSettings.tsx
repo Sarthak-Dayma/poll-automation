@@ -27,7 +27,7 @@ export const HostSettings = () => {
 
   const saveSettings = async () => {
     try {
-      const response = await fetch("http://localhost:5001/settings", {
+      const response = await fetch("http://localhost:5001/testsettings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings),

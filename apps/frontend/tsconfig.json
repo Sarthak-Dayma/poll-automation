@@ -2,7 +2,11 @@
   "files": [],
   "references": [
     { "path": "./tsconfig.app.json" },
+<<<<<<< HEAD
     { "path": "./tsconfig.node.json" },
     { "path": "../../shared/types" }
+=======
+    { "path": "./tsconfig.node.json" }
+>>>>>>> 9ee913167a2d6a89eff541e3f79d80bd6c0c6e3d
   ]
 }

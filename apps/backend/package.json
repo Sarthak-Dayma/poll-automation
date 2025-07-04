@@ -12,6 +12,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:ws": "ts-node-dev src/ws/ws-server.ts",
+    "start:llm": "ts-node-dev src/services/llm-forwarder.ts",
     "dev": "ts-node-dev src/index.ts",
     "dev:transcription": "nodemon src/transcription/index.ts",
     "lint": "eslint src/**/* --fix",

@@ -16,7 +16,7 @@ collection = db.pollquestions
 
 # Prompt Template
 TEMPLATE = """
-Based STRICTLY on the educational content provided below, generate {num_questions} high-quality, challenging, and well-structured {difficulty} {type} questions.
+Based STRICTLY on the educational content provided below, generate {num_questions} high-quality, challenging, and well-structured {difficulty} {types} questions.
 
 CONTEXT (Instructor's explanation):
 {context}
@@ -49,30 +49,49 @@ IMPORTANT:
 """
 
 def generate_questions_with_gemini(transcript, settings):
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    print("[Gemini] Settings received:", settings)
+
     prompt = TEMPLATE.format(
         context=transcript,
-        num_questions=settings["numQuestions"],
-        difficulty=settings["difficulty"],
-        type=settings["type"]
+        num_questions=settings["quantity"],
+        difficulty="medium",
+        types=", ".join(settings["types"]) if settings["types"] else "mcq"
     )
-    response = model.generate_content(prompt)
+    print("[Gemini] Prompt preview:\n", prompt[:500])
+
+    model = genai.GenerativeModel("gemini-2.0-flash")
+
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        print("[Gemini] API Error:", str(e))
+        return []
+
     text = response.text.strip()
+    print("[Gemini] Raw LLM output:\n", text[:1000])
 
     try:
         json_start = text.find("[")
         json_end = text.rfind("]") + 1
-        questions = json.loads(text[json_start:json_end])
+        parsed = text[json_start:json_end]
+        questions = json.loads(parsed)
+
+        if not isinstance(questions, list):
+            print("[Gemini] Parsed output is not a list:", parsed)
+            return []
+
         enriched = [{
             **q,
-            "meeting_id": settings["meeting_id"],
             "created_at": datetime.utcnow(),
             "is_active": True,
             "is_approved": False
         } for q in questions]
+
         collection.insert_many(enriched)
-        print("Questions saved to MongoDB")
+        print("[Gemini] Saved", len(enriched), "questions to MongoDB")
         return enriched
+
     except Exception as e:
-        print("Failed to parse or save Gemini response:", str(e))
+        print("[Gemini] Failed to parse or save response:", str(e))
         return []
+

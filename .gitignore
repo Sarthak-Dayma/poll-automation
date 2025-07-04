@@ -102,8 +102,19 @@ services/pollgen-llm/chroma_langchain_db
 *.tmp
 *.temp
 *~
+<<<<<<< HEAD
 apps/backend/transcriptions/
 services/whisper/transcriptions/
 services/whisper/test_minimal.py
 services/whisper/test_continuous.py
 services/whisper/test_audio.wav
+=======
+
+
+#repomix files
+/repomix*
+repomix*
+
+#bat files logs
+.installed.flag
+>>>>>>> 9ee913167a2d6a89eff541e3f79d80bd6c0c6e3d
